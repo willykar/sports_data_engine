@@ -5,16 +5,16 @@ An end-to-end, containerized ETL data pipeline that extracts Premier League matc
 ## 🏗️ Architecture & Data Flow
 
 1. **Extract (`src/extract.py`)**: Fetches raw JSON match data from the `football-data.org` REST API.
-2. **Transform (`src/transform.py`)**: Utilizes Pandas to flatten nested JSON, enforce strict data typing, and split the data into a Star Schema.
+2. **Transform (`src/transform.py`)**: Utilizes Pandas to flatten nested JSON, normalize and validate data types, and split the data into a Star Schema.
 3. **Load (`src/load.py`)**: Connects to PostgreSQL via SQLAlchemy and executes SQL `ON CONFLICT` statements to upsert data, handling both new match inserts and status updates for existing matches.
-4. **Serve (`src/report.py`)**: Executes complex `JOIN` queries across the role-playing dimensions to generate human-readable analytical reports.
+4. **Report (`src/report.py`)**: Executes complex `JOIN` queries across the role-playing dimensions to generate human-readable analytical reports.
 5. **Orchestrate (`pipeline.py`)**: A master execution script that triggers the pipeline sequentially, designed to be scheduled via OS cron jobs or visual automation nodes like n8n.
 
 ## 🛠️ Tech Stack
 * **Language:** Python 3 (Pandas, SQLAlchemy, Requests)
 * **Database:** PostgreSQL 15
 * **Infrastructure:** Docker & Docker Compose
-* **Orchestration:** Native Python subprocess (compatible with n8n/cron)
+* **Orchestration:** Python subprocess pipeline; designed to be schedulable via cron or a workflow orchestrator.
 
 ## 🚀 Key Engineering Features
 
@@ -22,6 +22,7 @@ An end-to-end, containerized ETL data pipeline that extracts Premier League matc
 * **Incremental Loading (Upserts):** Pipeline handles daily, automated runs without causing primary key conflicts. It intelligently ignores duplicate dimension records and updates fact records as future matches transition to `FINISHED`.
 * **Containerized Environment:** The database infrastructure is fully decoupled from the host machine using Docker Compose, guaranteeing identical setups across different deployment environments.
 * **Role-Playing Dimensions:** Demonstrates advanced SQL querying by joining the `dim_teams` table to the fact table twice (as both Home Team and Away Team) to reconstruct the event context.
+* **Data Quality Validation: Validates required fields, duplicate IDs, datetime types, foreign-key relationships, invalid statuses, self-matches, and impossible negative scores before data is written to processed files or loaded into PostgreSQL.
 
 ## ⚙️ Local Setup & Execution
 
