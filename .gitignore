@@ -1,0 +1,16 @@
+# Python Virtual Environment
+venv/
+__pycache__/
+
+# Data Folders (Never commit raw data or DB dumps)
+data/raw/*
+data/processed/*
+data/reports/*
+
+# Keep the directory structure, but ignore the files inside
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/reports/.gitkeep
+
+# Environment variables (If you add API keys later)
+.env
