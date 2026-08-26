@@ -72,18 +72,45 @@ upsert_matches = text('''
      status = EXCLUDED.status;
 ''')
 
+count_staging_teams = text("""
+    SELECT COUNT(*)
+    FROM sports_data_engine.stg_dim_teams;
+""")
+
+count_staging_matches = text("""
+    SELECT COUNT(*)
+    FROM sports_data_engine.stg_fact_matches;
+""")
+
+
 #4 Excute the SQL and clean up
 # Transcation
 print("Starting database transaction...")
 
-try: 
+try:
     with engine.begin() as conn: 
+        # calculate load statistics before the UPSERT
+    
+        staging_teams = conn.execute(
+            count_staging_teams
+        ).scalar_one()
+
+        staging_matches = conn.execute(
+            count_staging_matches
+        ).scalar_one()
+
+        print(f"Teams received from CSV: {staging_teams}")
+        print(f"Matches received from CSV: {staging_matches}")
+
         # Load/update dimension table 
         print("Updating dim_teams...") 
         conn.execute(upsert_teams) 
+
+
         # Load/update fact table 
         print("Updating fact_matches...") 
         conn.execute(upsert_matches) 
+        
         # Remove staging tables after successful load 
         print("Removing staging tables...") 
 
