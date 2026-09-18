@@ -1,7 +1,7 @@
 SELECT 
     f.match_date::date AS match_day,
     home.team_name AS home_team,
-    away.team_name AS away_team_id,
+    away.team_name AS away_team,
     f.home_score,
     f.away_score,
     f.status
@@ -10,5 +10,5 @@ INNER JOIN sports_data_engine.dim_teams AS home
     ON f.home_team_id = home.team_id
 INNER JOIN sports_data_engine.dim_teams AS away
     ON f.away_team_id = away.team_id
-ORDER BY f.match DESC
+ORDER BY f.match_date DESC
 LIMIT 10;

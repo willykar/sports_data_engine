@@ -14,3 +14,9 @@ data/reports/*
 
 # Environment variables (If you add API keys later)
 .env
+
+# Working notes. README.md is the only markdown that belongs to the project;
+# anything else dropped in the repo root is scratch and must not be committed.
+# Scoped to the root on purpose -- real docs under docs/ stay tracked.
+/*.md
+!/README.md

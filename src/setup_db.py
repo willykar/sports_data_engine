@@ -6,22 +6,27 @@ from sqlalchemy import create_engine, text
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+SCHEMA_FILE = BASE_DIR / "sql" / "01_schema.sql"
 
-load_dotenv(BASE_DIR / '.env')
 
-db_url = getenv("DB_URL")
+def main():
+    load_dotenv(BASE_DIR / '.env')
 
-if not db_url:
-    raise ValueError("Database url is not set")
+    db_url = getenv("DB_URL")
 
-engine = create_engine(db_url)
+    if not db_url:
+        raise ValueError("DB_URL is not set")
 
-schema_file = BASE_DIR / "sql" / "01_schema.sql"
+    engine = create_engine(db_url)
 
-with open(schema_file, 'r', encoding="utf-8") as file:
-    schema_sql = file.read()
+    with open(SCHEMA_FILE, 'r', encoding="utf-8") as file:
+        schema_sql = file.read()
 
-with engine.begin() as conn:
-    conn.execute(text(schema_sql))
+    with engine.begin() as conn:
+        conn.execute(text(schema_sql))
 
-print("Database schema created successfully.")
+    print("Database schema created successfully.")
+
+
+if __name__ == "__main__":
+    main()

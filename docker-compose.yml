@@ -1,10 +1,12 @@
-version: '3.8'
 services:
   postgres:
     image: postgres:15
     environment:
-      POSTGRES_USER: admin
+      # Read from .env, which is gitignored. Compose fails with the message
+      # below if a value is missing, rather than starting a half-configured
+      # container.
+      POSTGRES_USER: ${DB_USER:?set DB_USER in .env}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?set DB_PASSWORD in .env}
-      POSTGRES_DB: epl_analytics
+      POSTGRES_DB: ${DB_NAME:?set DB_NAME in .env}
     ports:
       - "5432:5432"
