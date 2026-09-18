@@ -4,6 +4,10 @@ import sys
 print("Starting Daily EPL Data Pipeline...")
 
 try:
+    print("Running automated tests")
+    subprocess.run([sys.executable, "-m", "pytest"],check=True)
+    print("All automated tests passed.")
+
     print("Step 1: Extracting data from API...")
     subprocess.run([sys.executable, "src/extract.py"], check=True)
 
