@@ -20,3 +20,10 @@ data/reports/*
 # Scoped to the root on purpose -- real docs under docs/ stay tracked.
 /*.md
 !/README.md
+
+# Airflow runtime output, generated per run and per container.
+# config/airflow.cfg holds a generated fernet_key and secret_key -- the fernet
+# key decrypts every stored Airflow connection, so it must never be committed.
+logs/
+plugins/
+config/airflow.cfg

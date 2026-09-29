@@ -3,64 +3,65 @@
 An end-to-end ETL pipeline that extracts Premier League match data from the
 [football-data.org](https://www.football-data.org/) API, transforms the nested
 JSON into a star schema with Pandas, validates it, and loads it incrementally
-into PostgreSQL through staging tables and transactional SQL upserts.
+into Supabase PostgreSQL through staging tables and transactional SQL upserts.
 
-Re-running the pipeline is safe: new matches are inserted, existing matches
-have their scores and statuses updated, and nothing is duplicated.
+Orchestrated by Apache Airflow running on Docker Compose. Re-running is safe:
+new matches are inserted, existing matches have their scores and statuses
+updated, and nothing is duplicated.
 
 ---
 
 ## Architecture
 
 ```text
-football-data.org API
-        │
-        ▼
-  src/extract.py        raw JSON  →  data/raw/season_2025_2026.json
-        │
-        ▼
-  src/transform.py      flatten → star schema → validate → CSV
-        │                         data/processed/dim_teams.csv
-        │                         data/processed/fact_matches.csv
-        ▼
-  src/load.py           CSV → staging tables → UPSERT → production
-        │                     (all inside one transaction)
-        ▼
-   PostgreSQL
+                    Airflow DAG (daily)
+                            |
+                            v
+                   run_test_safety_gate     pytest must pass before
+                            |               anything touches the API
+                            v
+                     extract_matches        football-data.org API
+                            |               -> data/raw/season_2025_2026.json
+                            v
+                 transform_and_validate     flatten -> star schema -> validate
+                            |               -> data/processed/*.csv
+                            v
+                    load_to_supabase        CSV -> staging -> UPSERT
+                            |               (one transaction)
+                            v
+                     generate_report        analytical SQL -> data/reports/
+                            |
+                            v
+                   Supabase PostgreSQL
 ```
 
-`pipeline.py` orchestrates the three stages with `subprocess`, and **runs the
-full test suite first** — if any test fails the pipeline stops before touching
-the API or the database. Any stage returning a non-zero exit code aborts the
-run.
-
-`src/report.py` is a standalone reporting script. It is **not** part of the
-automated pipeline run; invoke it directly when you want a report.
-
----
+Each stage is an Airflow task calling the matching module's `main()`. The
+modules import cleanly, so they run unchanged inside a task, from
+`pipeline.py`, or directly as scripts.
 
 ## Repository layout
 
 ```text
-pipeline.py               orchestrator: test gate → extract → transform → load
+dags/
+  sports_data_engine_dag.py   the Airflow DAG: the authoritative orchestrator
+Dockerfile                    apache/airflow:3.1.8 + this project's deps
+docker-compose.yaml           Airflow stack (CeleryExecutor, Redis, metadata DB)
+pipeline.py                   local runner: the same stages without Airflow
 src/
-  extract.py              football-data.org API → raw JSON
-  transform.py            flatten, build star schema, validate, write CSVs
-  load.py                 staging load + transactional UPSERT
-  report.py               standalone analytical report (run manually)
-  setup_db.py             applies sql/01_schema.sql to the configured database
+  extract.py                  football-data.org API -> raw JSON
+  transform.py                flatten, build star schema, validate, write CSVs
+  load.py                     staging load + transactional UPSERT
+  report.py                   analytical report (standalone)
+  setup_db.py                 applies sql/01_schema.sql to the database
 sql/
-  01_schema.sql           schema + dim_teams + fact_matches DDL
-  02_queries.sql          example analytical queries
+  01_schema.sql               schema + dim_teams + fact_matches DDL
+  02_queries.sql              example analytical queries
 tests/
-  test_transform.py       12 tests
-  test_validation.py      16 tests
-  test_load.py             5 tests
-docker-compose.yml        local PostgreSQL 15
-data/raw/ processed/ reports/    pipeline output (gitignored)
+  test_transform.py           12 tests
+  test_validation.py          16 tests
+  test_load.py                 5 tests
+data/raw/ processed/ reports/ pipeline output (gitignored)
 ```
-
----
 
 ## Data model
 
@@ -125,12 +126,12 @@ protects this.
 | | |
 |---|---|
 | Language | Python 3.10+ |
+| Orchestration | Apache Airflow 3.1.8 (CeleryExecutor + Redis) |
+| Containers | Docker Compose |
 | Data | Pandas 2.3 |
 | Database access | SQLAlchemy 2.0, psycopg2 |
 | HTTP | Requests |
-| Database | PostgreSQL 15 |
-| Local infrastructure | Docker Compose |
-| Hosted database | Supabase PostgreSQL |
+| Database | Supabase PostgreSQL |
 | Testing | pytest |
 | Config | python-dotenv |
 
@@ -140,81 +141,62 @@ protects this.
 
 ### Prerequisites
 
-- Python 3.10+
-- Docker Desktop (for the local database), or a Supabase project
+- Docker Desktop (for the Airflow stack)
+- Python 3.10+ (only if running without Airflow)
+- A Supabase project
 - A free [football-data.org](https://www.football-data.org/) API token —
   **required**; the extractor sends it as an `X-Auth-Token` header
 
 ### 1. Configure environment variables
 
-Create a `.env` file in the project root. It supplies both the application's
-connection and the local container's credentials, so it must exist before you
-start Docker.
+Create a `.env` file in the project root:
 
 ```bash
-# Application -> database
-DB_URL=postgresql+psycopg2://admin:your_password@localhost:5432/epl_analytics
-
-# football-data.org API token
+DB_URL=postgresql+psycopg2://<user>:<password>@<host>:5432/postgres
 football_data_api_key=your_football_data_org_token
-
-# Credentials the local Docker container is created with
-DB_USER=admin
-DB_PASSWORD=your_password
-DB_NAME=epl_analytics
 ```
 
-`DB_URL` is the only variable the application reads, and it can point at
-either the local Docker database or a Supabase connection string. The three
-`DB_*` values below it are consumed by `docker-compose.yml` when it builds the
-local container — keep them consistent with `DB_URL` when running locally.
+`DB_URL` is the only database variable the application reads — point it at
+your Supabase connection string. `.env` is gitignored and is mounted into the
+Airflow containers at `/opt/airflow/.env`; never commit it.
 
-`.env` is gitignored. Never commit it.
-
-### 2. Start the local database
-
-```bash
-docker compose up -d
-```
-
-PostgreSQL 15 on port 5432, created with the `DB_USER`, `DB_PASSWORD` and
-`DB_NAME` from `.env`. Compose fails with an explicit message if any of them
-is missing, rather than starting a half-configured container.
-
-Skip this step if you are using Supabase — just point `DB_URL` at it.
-
-### 3. Set up the Python environment
-
-```bash
-python -m venv venv
-venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-On macOS or Linux, use `source venv/bin/activate`.
-
-### 4. Create the schema
+### 2. Create the schema
 
 ```bash
 python src/setup_db.py
 ```
 
-This applies `sql/01_schema.sql` through SQLAlchemy and works against local
-PostgreSQL and Supabase alike. Against the local container you can instead
-pipe the DDL in directly:
+Applies `sql/01_schema.sql` through SQLAlchemy. Run once per database.
+
+### 3a. Run with Airflow
 
 ```bash
-docker exec -i sports_data_engine-postgres-1 psql -U admin -d epl_analytics < sql/01_schema.sql
+docker compose up -d --build
 ```
 
-### 5. Run the pipeline
+Airflow's UI is at `http://localhost:8080` (default credentials
+`airflow` / `airflow`). Enable and trigger `sports_data_engine_pipeline`.
+
+The compose file mounts `dags/`, `src/`, `tests/`, `data/`, `config/`,
+`plugins/` and `.env` into the containers, so code changes apply without a
+rebuild. Rebuild only when `requirements.txt` changes:
+
+```bash
+docker compose build --no-cache
+```
+
+### 3b. Run without Airflow
+
+```bash
+python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
+```
 
 ```bash
 python pipeline.py
 ```
 
-Tests run first, then extract, transform and load. Run it from the project
-root — the extractor writes its raw JSON relative to the working directory.
+Runs the test suite, then the same four stages in the same order. On macOS or
+Linux use `source venv/bin/activate`.
 
 ---
 
@@ -233,7 +215,8 @@ pytest -v
 | `test_load.py` | 5 | staging writes, both upsert statements, transaction orchestration, rollback on failure |
 
 The load tests use mocked database objects, so the suite runs without a live
-database.
+database. The DAG runs this same suite as its first task, so a failing test
+stops the pipeline before it reaches the API.
 
 ---
 
@@ -244,5 +227,5 @@ python src/report.py
 ```
 
 Joins `fact_matches` against `dim_teams` twice — once per role — prints the
-result and writes `data/reports/latest_matches_report.csv`. Requires a
-populated database.
+result and writes `data/reports/latest_matches_report.csv`. Also runs as the
+DAG's final task.
