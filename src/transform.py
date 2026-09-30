@@ -145,9 +145,29 @@ def validate_data(dim_teams, fact_matches):
     print("All data quality checks passed!")
 
 
+# Declared explicitly so an empty window still produces a correctly shaped
+# frame. Incremental runs can legitimately fetch zero matches, and building a
+# DataFrame from an empty list would otherwise have no columns at all.
+MATCH_COLUMNS = [
+    "match_id",
+    "match_date",
+    "home_team_id",
+    "home_team_name",
+    "away_team_id",
+    "away_team_name",
+    "home_score",
+    "away_score",
+    "status",
+]
+
+
 def transform_matches(matches_list):
     """
     Transform raw API match records into a flat DataFrame.
+
+    An empty list yields an empty frame with the right columns and dtypes, so
+    a window with no fixtures flows through validation and loading as a no-op
+    instead of raising.
     """
 
     match_records = []
@@ -167,7 +187,7 @@ def transform_matches(matches_list):
 
         match_records.append(record)
 
-    df_matches = pd.DataFrame(match_records)
+    df_matches = pd.DataFrame(match_records, columns=MATCH_COLUMNS)
 
     # Convert date
     df_matches["match_date"] = pd.to_datetime(

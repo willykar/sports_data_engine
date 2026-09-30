@@ -47,11 +47,20 @@ def fetch_matches(date_from=None, date_to=None):
     return response.json()
 
 
-def main():
-    parsed_content = fetch_matches()
+def main(date_from=None, date_to=None):
+    """
+    Fetch matches and write them to data/raw/.
+
+    With no dates this pulls the whole competition, which is what a manual or
+    local run wants. The DAG passes a window derived from the run's logical
+    date, so a scheduled run only carries the handful of matches around that
+    day rather than re-fetching the season.
+    """
+    parsed_content = fetch_matches(date_from=date_from, date_to=date_to)
 
     matches = parsed_content.get("matches", [])
-    print(f"Successfully fetched {len(matches)} matches.")
+    window = f" between {date_from} and {date_to}" if date_from else ""
+    print(f"Successfully fetched {len(matches)} matches{window}.")
 
     ## print the keys of the first element in the matches
     if matches:

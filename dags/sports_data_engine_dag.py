@@ -17,6 +17,23 @@ WINDOW_DAYS_BACK = 1
 WINDOW_DAYS_AHEAD = 1
 
 
+def window_for(ds):
+    """
+    The date window a run works on, derived from its logical date.
+
+    Both the fixture check and the extract call this, so the two cannot drift
+    apart -- a branch that green-lights a day whose extract window is empty
+    would push an empty payload through the rest of the pipeline. Keying off
+    the logical date rather than today's date also makes a run reproducible:
+    re-running it, or backfilling one, fetches the same window.
+    """
+    day = date.fromisoformat(ds)
+    return (
+        (day - timedelta(days=WINDOW_DAYS_BACK)).isoformat(),
+        (day + timedelta(days=WINDOW_DAYS_AHEAD)).isoformat(),
+    )
+
+
 @dag(
     dag_id="sports_data_engine_pipeline",
     default_args={
@@ -32,18 +49,16 @@ WINDOW_DAYS_AHEAD = 1
 def sports_data_engine():
 
     @task.branch
-    def check_if_games_exist():
+    def check_if_games_exist(ds=None):
         """
         Cheap gate in front of the pipeline: ask the API whether there are any
-        fixtures in a small window around today. One windowed request, nothing
-        written and nothing loaded. If the window is empty the run ends here
-        instead of re-processing the whole season.
+        fixtures in this run's window. One windowed request, nothing written
+        and nothing loaded. If the window is empty the run ends here instead
+        of re-processing anything.
         """
         from src.extract import fetch_matches
 
-        today = date.today()
-        date_from = (today - timedelta(days=WINDOW_DAYS_BACK)).isoformat()
-        date_to = (today + timedelta(days=WINDOW_DAYS_AHEAD)).isoformat()
+        date_from, date_to = window_for(ds)
 
         matches = fetch_matches(date_from=date_from, date_to=date_to).get("matches", [])
         print(f"{len(matches)} fixture(s) between {date_from} and {date_to}.")
@@ -76,14 +91,21 @@ def sports_data_engine():
         print("All tests passed. Proceeding with ETL.")
 
     @task
-    def extract_matches():
+    def extract_matches(ds=None):
         """
-        Extracts raw Premier League match data and writes it to data/raw/.
+        Extracts this run's window of Premier League matches into data/raw/.
+
+        Incremental by design: the payload holds the handful of matches around
+        the logical date, not the whole season. The load is an upsert keyed on
+        match_id, so a narrow payload updates those rows and leaves every other
+        match in the warehouse untouched.
         """
         from src.extract import main as run_extract
 
-        print("Starting extraction from external football API...")
-        run_extract()
+        date_from, date_to = window_for(ds)
+
+        print(f"Starting extraction for {date_from} to {date_to}...")
+        run_extract(date_from=date_from, date_to=date_to)
         print("Extraction complete: raw JSON stored.")
 
     @task

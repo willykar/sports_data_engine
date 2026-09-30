@@ -1,6 +1,11 @@
 import pandas as pd
 
-from src.transform import transform_matches, build_dim_teams, build_fact_matches
+from src.transform import (
+    transform_matches,
+    build_dim_teams,
+    build_fact_matches,
+    validate_data,
+)
 
 
 def test_transform_matches_creates_expected_columns():
@@ -328,3 +333,19 @@ def test_build_fact_matches_preserves_match_data():
     assert row["home_score"] == 2
     assert row["away_score"] == 1
     assert row["status"] == "FINISHED"
+
+def test_transform_matches_handles_an_empty_window():
+    # An incremental run can legitimately fetch zero matches. That must produce
+    # a correctly shaped, correctly typed empty frame that flows through
+    # validation and loading as a no-op, not a KeyError on a missing column.
+    df = transform_matches([])
+
+    assert df.empty
+    assert list(df.columns) == [
+        "match_id", "match_date", "home_team_id", "home_team_name",
+        "away_team_id", "away_team_name", "home_score", "away_score", "status",
+    ]
+    assert pd.api.types.is_datetime64_any_dtype(df["match_date"])
+
+    # And the rest of the chain tolerates it.
+    validate_data(dim_teams=build_dim_teams(df), fact_matches=build_fact_matches(df))

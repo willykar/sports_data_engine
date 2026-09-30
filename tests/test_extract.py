@@ -114,3 +114,31 @@ def test_fetch_matches_writes_nothing():
         fetch_matches(date_from="2026-10-09", date_to="2026-10-11")
 
     dump.assert_not_called()
+
+
+def test_main_forwards_the_window_to_fetch_matches():
+    # The DAG derives a window from the run's logical date; main() must pass
+    # it through rather than quietly fetching the whole competition.
+    with patch("src.extract.fetch_matches", return_value=PAYLOAD) as fetch, \
+         patch("src.extract.dump"), \
+         patch("builtins.open"):
+
+        from src.extract import main
+        main(date_from="2026-10-09", date_to="2026-10-11")
+
+    assert fetch.call_args.kwargs == {
+        "date_from": "2026-10-09",
+        "date_to": "2026-10-11",
+    }
+
+
+def test_main_fetches_the_whole_competition_when_given_no_window():
+    # A manual or local run has no logical date and should still get the season.
+    with patch("src.extract.fetch_matches", return_value=PAYLOAD) as fetch, \
+         patch("src.extract.dump"), \
+         patch("builtins.open"):
+
+        from src.extract import main
+        main()
+
+    assert fetch.call_args.kwargs == {"date_from": None, "date_to": None}
