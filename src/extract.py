@@ -11,7 +11,20 @@ OUTPUT_FILE = BASE_DIR / "data" / "raw" / "season_2025_2026.json"
 URL = 'https://api.football-data.org/v4/competitions/PL/matches'
 
 
-def main():
+def fetch_matches(date_from=None, date_to=None):
+    """
+    Fetch the competition's matches and return the full parsed payload.
+
+    Writes nothing. Pass date_from and date_to as YYYY-MM-DD to narrow the
+    window -- the DAG's branch uses this to ask whether there are any fixtures
+    worth running the pipeline for, at the cost of one small request.
+
+    football-data.org requires the two dates together, so supplying only one
+    is rejected here rather than by the API.
+    """
+    if (date_from is None) != (date_to is None):
+        raise ValueError("date_from and date_to must be given together")
+
     load_dotenv(BASE_DIR / '.env')
 
     api_key = getenv('football_data_api_key')
@@ -23,10 +36,19 @@ def main():
         'X-Auth-Token': api_key
     }
 
-    response = requests.get(URL, headers=headers)
+    params = {}
+    if date_from:
+        params["dateFrom"] = date_from
+        params["dateTo"] = date_to
+
+    response = requests.get(URL, headers=headers, params=params or None)
     response.raise_for_status()
 
-    parsed_content = response.json()
+    return response.json()
+
+
+def main():
+    parsed_content = fetch_matches()
 
     matches = parsed_content.get("matches", [])
     print(f"Successfully fetched {len(matches)} matches.")

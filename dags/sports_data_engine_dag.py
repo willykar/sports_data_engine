@@ -1,7 +1,7 @@
 import sys
 import subprocess
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from airflow.decorators import dag, task
 
@@ -10,11 +10,11 @@ from airflow.decorators import dag, task
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.append(str(BASE_DIR))
 
-# Nothing from `src` is imported here on purpose. Airflow re-parses every DAG
-# file on a short interval, so a top-level import would pull in pandas,
-# SQLAlchemy and psycopg2 on every parse. The imports live inside the tasks,
-# where they run once per execution instead. Each src.main() loads .env
-# itself, so the DAG does not need to.
+# How far either side of the run date the fixture check looks. Wide enough to
+# catch results that landed late and fixtures about to be played, narrow
+# enough that a quiet midweek ends the run immediately.
+WINDOW_DAYS_BACK = 1
+WINDOW_DAYS_AHEAD = 1
 
 
 @dag(
@@ -30,6 +30,34 @@ sys.path.append(str(BASE_DIR))
     tags=["sports_data"],
 )
 def sports_data_engine():
+
+    @task.branch
+    def check_if_games_exist():
+        """
+        Cheap gate in front of the pipeline: ask the API whether there are any
+        fixtures in a small window around today. One windowed request, nothing
+        written and nothing loaded. If the window is empty the run ends here
+        instead of re-processing the whole season.
+        """
+        from src.extract import fetch_matches
+
+        today = date.today()
+        date_from = (today - timedelta(days=WINDOW_DAYS_BACK)).isoformat()
+        date_to = (today + timedelta(days=WINDOW_DAYS_AHEAD)).isoformat()
+
+        matches = fetch_matches(date_from=date_from, date_to=date_to).get("matches", [])
+        print(f"{len(matches)} fixture(s) between {date_from} and {date_to}.")
+
+        if not matches:
+            return "no_games"
+        return "run_test_safety_gate"
+
+    @task
+    def no_games():
+        """
+        Terminates the run when the fixture window is empty.
+        """
+        print("No fixtures in the window. Skipping the pipeline.")
 
     @task
     def run_test_safety_gate():
@@ -92,14 +120,29 @@ def sports_data_engine():
         run_report()
         print("Reporting complete: CSV generated in data/reports/.")
 
-    # Pipeline execution flow (linear dependency).
+    @task(trigger_rule="none_failed_min_one_success")
+    def pipeline_complete():
+        """
+        Single terminal task both branches converge on, so there is one place
+        to check whether a run finished. It needs a non-default trigger rule:
+        under the default all_success it would be skipped along with whichever
+        branch was not taken.
+        """
+        print("Run finished.")
+
+    gate = check_if_games_exist()
+    skip = no_games()
     test_gate = run_test_safety_gate()
     extract = extract_matches()
     transform = transform_and_validate()
     load = load_to_supabase()
     report = generate_report()
+    done = pipeline_complete()
 
-    test_gate >> extract >> transform >> load >> report
+    # The branch picks one path; both converge on pipeline_complete.
+    gate >> [test_gate, skip]
+    test_gate >> extract >> transform >> load >> report >> done
+    skip >> done
 
 
 # Instantiate the DAG.
