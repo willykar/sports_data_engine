@@ -152,6 +152,44 @@ def sports_data_engine():
         """
         print("Run finished.")
 
+    @task
+    def load_to_snowflake():
+        """
+        Lands raw match payloads as semi-structured JSON (VARIANT) into Snowflake
+        for downstream dbt transformation (ELT).
+        Skipped if Snowflake credentials are not configured in .env.
+        """
+        import os
+        from dotenv import load_dotenv
+        load_dotenv(BASE_DIR / ".env")
+        if not os.getenv("SNOWFLAKE_ACCOUNT"):
+            print("SNOWFLAKE_ACCOUNT not set in .env. Skipping Snowflake raw load.")
+            return
+
+        from src.load_raw_snowflake import main as run_load_snowflake
+        print("Starting raw JSON load into Snowflake...")
+        run_load_snowflake()
+        print("Snowflake raw load complete.")
+
+    @task
+    def transform_and_test_dbt():
+        """
+        Executes dbt models and tests (staging views, dimensional marts, schema tests)
+        against Snowflake.
+        Skipped if Snowflake credentials are not configured in .env.
+        """
+        import os
+        from dotenv import load_dotenv
+        load_dotenv(BASE_DIR / ".env")
+        if not os.getenv("SNOWFLAKE_ACCOUNT"):
+            print("SNOWFLAKE_ACCOUNT not set in .env. Skipping dbt build.")
+            return
+
+        from src.run_dbt import run_dbt
+        print("Executing dbt build against Snowflake...")
+        run_dbt("build")
+        print("dbt build complete.")
+
     gate = check_if_games_exist()
     skip = no_games()
     test_gate = run_test_safety_gate()
@@ -159,11 +197,15 @@ def sports_data_engine():
     transform = transform_and_validate()
     load = load_to_supabase()
     report = generate_report()
+    load_snowflake = load_to_snowflake()
+    run_dbt_models = transform_and_test_dbt()
     done = pipeline_complete()
 
     # The branch picks one path; both converge on pipeline_complete.
     gate >> [test_gate, skip]
-    test_gate >> extract >> transform >> load >> report >> done
+    test_gate >> extract
+    extract >> transform >> load >> report >> done
+    extract >> load_snowflake >> run_dbt_models >> done
     skip >> done
 
 

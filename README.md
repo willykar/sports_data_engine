@@ -1,231 +1,220 @@
-# Sports Data Engine — Automated ETL Pipeline
+# Sports Data Engine — Automated ETL & Snowflake ELT Pipeline
 
-An end-to-end ETL pipeline that extracts Premier League match data from the
-[football-data.org](https://www.football-data.org/) API, transforms the nested
-JSON into a star schema with Pandas, validates it, and loads it incrementally
-into Supabase PostgreSQL through staging tables and transactional SQL upserts.
+An end-to-end data pipeline that extracts Premier League match data from the
+[football-data.org](https://www.football-data.org/) API. The project supports two
+production architectures:
 
-Orchestrated by Apache Airflow running on Docker Compose. Re-running is safe:
-new matches are inserted, existing matches have their scores and statuses
-updated, and nothing is duplicated.
+1. **Transactional PostgreSQL ETL:** Raw JSON $\rightarrow$ Pandas star-schema modeling and data quality validation $\rightarrow$ staging tables and transactional SQL upserts into PostgreSQL / Supabase.
+2. **Cloud Warehouse Snowflake ELT:** Raw API JSON landed directly into Snowflake as semi-structured `VARIANT` payloads $\rightarrow$ modular in-warehouse modeling and automated testing with **dbt**.
+
+Orchestrated by Apache Airflow running on Docker Compose (with local CLI execution via `pipeline.py`). Re-running is safe and idempotent across both warehouses.
 
 ---
 
 ## Architecture
 
 ```text
-                    Airflow DAG (daily)
-                            |
-                            v
-                   run_test_safety_gate     pytest must pass before
-                            |               anything touches the API
-                            v
-                     extract_matches        football-data.org API
-                            |               -> data/raw/season_2025_2026.json
-                            v
-                 transform_and_validate     flatten -> star schema -> validate
-                            |               -> data/processed/*.csv
-                            v
-                    load_to_supabase        CSV -> staging -> UPSERT
-                            |               (one transaction)
-                            v
-                     generate_report        analytical SQL -> data/reports/
-                            |
-                            v
-                   Supabase PostgreSQL
+                                Airflow DAG / pipeline.py
+                                           |
+                                           v
+                                 run_test_safety_gate
+                             (pytest gate: 54 unit tests)
+                                           |
+                                           v
+                                    extract_matches
+                                 football-data.org API
+                            -> data/raw/season_2025_2026.json
+                                     /           \
+                                    /             \
+                  [PostgreSQL ETL Path]         [Snowflake ELT Path]
+                           |                             |
+                           v                             v
+                transform_and_validate          load_to_snowflake
+               Pandas flatten & validate       Raw JSON -> RAW.RAW_MATCHES
+                           |                   (VARIANT column, MERGE upsert)
+                           v                             |
+                   load_to_supabase                      v
+               CSV -> staging -> UPSERT        transform_and_test_dbt
+               (in-transaction merge)          dbt build (models & 17 tests)
+                           |                             |
+                           v                             v
+                    generate_report             Snowflake Data Cloud
+               analytical SQL -> reports       (stg_matches, dim_teams,
+                           |                    fact_matches)
+                           v                             |
+                  Supabase PostgreSQL                    |
+                           \                             /
+                            \                           /
+                             v                         v
+                                    pipeline_complete
 ```
 
-Each stage is an Airflow task calling the matching module's `main()`. The
-modules import cleanly, so they run unchanged inside a task, from
-`pipeline.py`, or directly as scripts.
+---
 
 ## Repository layout
 
 ```text
 dags/
-  sports_data_engine_dag.py   the Airflow DAG: the authoritative orchestrator
-Dockerfile                    apache/airflow:3.1.8 + this project's deps
-docker-compose.yaml           Airflow stack (CeleryExecutor, Redis, metadata DB)
-pipeline.py                   local runner: the same stages without Airflow
+  sports_data_engine_dag.py   Airflow DAG: orchestrates PostgreSQL and Snowflake paths
+dbt/
+  dbt_project.yml             dbt project configuration
+  profiles.yml                Snowflake connection profile (reads from .env)
+  models/
+    staging/
+      _sources.yml            Raw source declaration on RAW.RAW_MATCHES
+      stg_matches.sql         Flattens VARIANT JSON; null score preservation
+    marts/
+      _schema.yml             Schema & integrity tests for dimensional models
+      dim_teams.sql           Unique clubs dimension table
+      fact_matches.sql        Match events fact table
+  tests/                      Singular domain data quality tests
+Dockerfile                    apache/airflow:3.1.8 + project dependencies
+docker-compose.yaml           Airflow stack with mounted volumes (src, dags, dbt, tests)
+pipeline.py                   Local runner supporting --target postgres|snowflake|all
 src/
-  extract.py                  football-data.org API -> raw JSON
-  transform.py                flatten, build star schema, validate, write CSVs
-  load.py                     staging load + transactional UPSERT
-  report.py                   analytical report (standalone)
-  setup_db.py                 applies sql/01_schema.sql to the database
+  extract.py                  API extraction (full competition or date-windowed)
+  transform.py                Pandas flattening, star schema construction, validation
+  load.py                     PostgreSQL staging load + transactional UPSERT
+  load_raw_snowflake.py       Snowflake raw VARIANT landing with transactional MERGE
+  run_dbt.py                  Programmatic runner for dbt build/test commands
+  report.py                   Analytical SQL report against PostgreSQL
+  setup_db.py                 Applies sql/01_schema.sql to PostgreSQL
 sql/
-  01_schema.sql               schema + dim_teams + fact_matches DDL
-  02_queries.sql              example analytical queries
+  01_schema.sql               PostgreSQL schema + DDL
+  02_queries.sql              Analytical queries
+  03_snowflake_setup.sql      Snowflake database, warehouse, schemas and landing table DDL
 tests/
-  test_transform.py           12 tests
-  test_validation.py          16 tests
-  test_load.py                 5 tests
-data/raw/ processed/ reports/ pipeline output (gitignored)
+  test_extract.py             11 extraction tests (windowing, error handling)
+  test_transform.py           13 transformation tests (flattening, types, empty windows)
+  test_validation.py          16 data quality and validation tests
+  test_load.py                 5 PostgreSQL load and rollback tests
+  test_load_snowflake.py       6 Snowflake raw loader tests (staging, MERGE, rollback)
+  test_run_dbt.py              3 dbt runner orchestration tests
+data/raw/ processed/ reports/ pipeline output artifacts (gitignored)
 ```
+
+---
 
 ## Data model
 
-A star schema in the `sports_data_engine` schema.
+The dimensional star schema is modeled identically across both warehouses:
 
 **`dim_teams`**
 
 | Column | Type | Notes |
 |---|---|---|
-| `team_id` | `INTEGER` | primary key |
-| `team_name` | `TEXT` | not null, unique |
+| `team_id` | `INTEGER` / `NUMBER` | Primary key |
+| `team_name` | `TEXT` / `VARCHAR` | Not null, unique |
 
 **`fact_matches`**
 
 | Column | Type | Notes |
 |---|---|---|
-| `match_id` | `INTEGER` | primary key |
-| `home_team_id` | `INTEGER` | not null → `dim_teams.team_id` |
-| `away_team_id` | `INTEGER` | not null → `dim_teams.team_id` |
-| `home_score` | `INTEGER` | nullable — see below |
-| `away_score` | `INTEGER` | nullable — see below |
-| `status` | `TEXT` | not null |
-| `match_date` | `TIMESTAMP` | not null |
+| `match_id` | `INTEGER` / `NUMBER` | Primary key |
+| `home_team_id` | `INTEGER` / `NUMBER` | Not null $\rightarrow$ `dim_teams.team_id` |
+| `away_team_id` | `INTEGER` / `NUMBER` | Not null $\rightarrow$ `dim_teams.team_id` |
+| `home_score` | `INTEGER` / `NUMBER` | Nullable — see below |
+| `away_score` | `INTEGER` / `NUMBER` | Nullable — see below |
+| `status` | `TEXT` / `VARCHAR` | Not null (`FINISHED`, `SCHEDULED`, `TIMED`, etc.) |
+| `match_date` | `TIMESTAMP` | Kickoff datetime (UTC) |
 
-`dim_teams` is a **role-playing dimension**: `fact_matches` joins it twice, as
-home team and as away team, to reconstruct the full match.
+`dim_teams` is a **role-playing dimension**: `fact_matches` joins it twice (as home team and away team) to reconstruct the full match fixture.
 
-**A missing score is `NULL`, never `0`.** An unplayed match carries `NaN`
-through the transform and `NULL` into the database, because `0–0` is a real
-football result and must stay distinguishable from "not played yet". A test
-protects this.
+**A missing score is `NULL`, never `0`.** An unplayed or upcoming match carries `NaN`/`NULL` through both transformation paths. `0–0` is a genuine football result and must remain distinguishable from unplayed fixtures. Both `pytest` and `dbt` singular tests enforce this invariant.
 
 ---
 
 ## Engineering features
 
-- **Incremental loading.** `dim_teams` upserts with `ON CONFLICT DO NOTHING`;
-  `fact_matches` upserts with `ON CONFLICT DO UPDATE`, refreshing score and
-  status as matches progress. Repeated runs never duplicate rows.
-- **Staging tables.** Transformed CSVs land in `stg_dim_teams` and
-  `stg_fact_matches` (recreated each run), and production tables are only
-  touched by controlled SQL upserts reading from staging. The staging tables
-  are dropped at the end of the transaction.
-- **Transactional loading.** Staging counts, both upserts and the staging
-  cleanup run inside a single `engine.begin()` block. Any failure rolls the
-  whole thing back — covered by a dedicated rollback test.
-- **Data quality gate.** `validate_data()` runs before anything is written:
-  missing and duplicate keys, empty team names, `match_date` dtype,
-  referential integrity of both team foreign keys, teams playing themselves,
-  negative scores, and status values outside the permitted set (`SCHEDULED`,
-  `TIMED`, `IN_PLAY`, `PAUSED`, `FINISHED`, `POSTPONED`, `SUSPENDED`,
-  `CANCELLED`). A violation raises and stops the run.
-- **Test safety gate.** `pipeline.py` runs `pytest` before the ETL stages.
-- **Portable database target.** The application only ever reads `DB_URL`, so
-  the same code and schema run against local Docker PostgreSQL or hosted
-  Supabase with no change.
+- **Dual Warehouse Architecture:** PostgreSQL for operational relational loading (ETL); Snowflake + dbt for modern cloud analytical warehousing (ELT).
+- **Semi-Structured VARIANT Landing:** In Snowflake, raw JSON payloads land unadulterated into `RAW.RAW_MATCHES` (`payload VARIANT`), decoupling ingestion from transformation.
+- **Atomic Upserts & Idempotency:**
+  - PostgreSQL: Session staging table $\rightarrow$ `INSERT ... ON CONFLICT DO UPDATE`.
+  - Snowflake: Temporary staging table $\rightarrow$ `MERGE INTO ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT`.
+- **dbt Modeling & In-Warehouse Testing:** 20 data models and tests compiling and running directly on Snowflake compute.
+- **Safety Gate:** Automated test gate halts pipeline execution before any API calls or database mutations occur if unit tests fail.
 
 ---
 
 ## Tech stack
 
-| | |
+| Component | Technology |
 |---|---|
 | Language | Python 3.10+ |
-| Orchestration | Apache Airflow 3.1.8 (CeleryExecutor + Redis) |
-| Containers | Docker Compose |
-| Data | Pandas 2.3 |
-| Database access | SQLAlchemy 2.0, psycopg2 |
-| HTTP | Requests |
-| Database | Supabase PostgreSQL |
-| Testing | pytest |
-| Config | python-dotenv |
+| Orchestration | Apache Airflow 3.1.8 (Docker Compose) |
+| Cloud Warehouse | Snowflake |
+| Transformation Framework | dbt Core 1.13 + dbt-snowflake |
+| Relational Database | Supabase PostgreSQL / Local PostgreSQL |
+| Data Processing | Pandas 2.3 |
+| Connectors | snowflake-connector-python, SQLAlchemy 2.0, psycopg2 |
+| Testing | pytest 9.1, dbt data tests |
 
 ---
 
-## Setup
+## Setup & Execution
 
-### Prerequisites
-
-- Docker Desktop (for the Airflow stack)
-- Python 3.10+ (only if running without Airflow)
-- A Supabase project
-- A free [football-data.org](https://www.football-data.org/) API token —
-  **required**; the extractor sends it as an `X-Auth-Token` header
-
-### 1. Configure environment variables
-
-Create a `.env` file in the project root:
+### 1. Configure Environment Variables
+Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
-DB_URL=postgresql+psycopg2://<user>:<password>@<host>:5432/postgres
-football_data_api_key=your_football_data_org_token
+# API Key
+football_data_api_key=your_api_key
+
+# PostgreSQL (Supabase / Local)
+DB_URL=postgresql+psycopg2://user:password@host:5432/dbname
+
+# Snowflake
+SNOWFLAKE_ACCOUNT=your_account_identifier
+SNOWFLAKE_USER=your_username
+SNOWFLAKE_PASSWORD=your_password
+SNOWFLAKE_ROLE=ACCOUNTADMIN
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
+SNOWFLAKE_DATABASE=SPORTS_DATA
+SNOWFLAKE_SCHEMA=RAW
 ```
 
-`DB_URL` is the only database variable the application reads — point it at
-your Supabase connection string. `.env` is gitignored and is mounted into the
-Airflow containers at `/opt/airflow/.env`; never commit it.
+### 2. Initialize Warehouses
+- **PostgreSQL:** `python src/setup_db.py`
+- **Snowflake:** Run `sql/03_snowflake_setup.sql` in your Snowflake worksheet to create database, warehouse, schemas, and landing table.
 
-### 2. Create the schema
+### 3. Run Pipeline Locally
 
 ```bash
-python src/setup_db.py
+# Run Snowflake ELT pipeline (extract -> raw landing -> dbt build)
+python pipeline.py --target snowflake
+
+# Run PostgreSQL ETL pipeline (extract -> transform -> load -> report)
+python pipeline.py --target postgres
+
+# Run both targets in a single run
+python pipeline.py --target all
 ```
 
-Applies `sql/01_schema.sql` through SQLAlchemy. Run once per database.
-
-### 3a. Run with Airflow
+### 4. Run with Airflow
 
 ```bash
 docker compose up -d --build
 ```
-
-Airflow's UI is at `http://localhost:8080` (default credentials
-`airflow` / `airflow`). Enable and trigger `sports_data_engine_pipeline`.
-
-The compose file mounts `dags/`, `src/`, `tests/`, `data/`, `config/`,
-`plugins/` and `.env` into the containers, so code changes apply without a
-rebuild. Rebuild only when `requirements.txt` changes:
-
-```bash
-docker compose build --no-cache
-```
-
-### 3b. Run without Airflow
-
-```bash
-python -m venv venv && venv\Scripts\activate && pip install -r requirements.txt
-```
-
-```bash
-python pipeline.py
-```
-
-Runs the test suite, then the same four stages in the same order. On macOS or
-Linux use `source venv/bin/activate`.
+Access the Airflow UI at `http://localhost:8080` (default credentials: `airflow`/`airflow`) and trigger `sports_data_engine_pipeline`.
 
 ---
 
 ## Tests
 
 ```bash
+# Run the complete Python test suite (54 passed)
 pytest -v
-```
 
-33 tests, all passing:
+# Run dbt data quality tests against Snowflake
+dbt test --project-dir dbt --profiles-dir dbt
+```
 
 | Suite | Tests | Covers |
 |---|---|---|
-| `test_transform.py` | 12 | flattening, `build_dim_teams()`, `build_fact_matches()` |
-| `test_validation.py` | 16 | every data quality rule, including missing-score semantics |
-| `test_load.py` | 5 | staging writes, both upsert statements, transaction orchestration, rollback on failure |
-
-The load tests use mocked database objects, so the suite runs without a live
-database. The DAG runs this same suite as its first task, so a failing test
-stops the pipeline before it reaches the API.
-
----
-
-## Reporting
-
-```bash
-python src/report.py
-```
-
-Joins `fact_matches` against `dim_teams` twice — once per role — prints the
-result and writes `data/reports/latest_matches_report.csv`. Also runs as the
-DAG's final task.
+| `test_extract.py` | 11 | API requests, incremental windowing, token validation |
+| `test_transform.py` | 13 | JSON flattening, star schema builds, empty window handling |
+| `test_validation.py` | 16 | Data quality rules, score constraints, status domain checks |
+| `test_load.py` | 5 | PostgreSQL staging, upsert statements, transaction rollbacks |
+| `test_load_snowflake.py` | 6 | Snowflake config, VARIANT staging, MERGE statements, rollbacks |
+| `test_run_dbt.py` | 3 | dbt CLI executable discovery and invocation |
+| **dbt tests** | 17 | Primary keys, foreign key relationships, accepted values, score invariants |

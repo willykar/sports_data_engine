@@ -1,0 +1,19 @@
+version: 2
+
+sources:
+  - name: raw
+    database: "{{ env_var('SNOWFLAKE_DATABASE', 'SPORTS_DATA') }}"
+    schema: RAW
+    tables:
+      - name: raw_matches
+        description: "Raw football-data.org match JSON payloads stored in Snowflake VARIANT column"
+        columns:
+          - name: match_id
+            description: "Primary key for the match from the source API"
+            tests:
+              - unique
+              - not_null
+          - name: payload
+            description: "Full unedited JSON payload of the match"
+          - name: loaded_at
+            description: "Timestamp when the raw record was landed"
