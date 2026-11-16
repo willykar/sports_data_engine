@@ -42,6 +42,14 @@ def test_fetch_matches_sends_the_api_token_as_a_header():
     assert get.call_args.kwargs["headers"] == {"X-Auth-Token": "secret-token"}
 
 
+def test_fetch_matches_sets_a_request_timeout():
+    with patch("src.extract.load_dotenv"),          patch("src.extract.getenv", return_value="secret-token"),          patch("src.extract.requests.get", return_value=_response()) as get:
+
+        fetch_matches()
+
+    assert get.call_args.kwargs["timeout"] > 0
+
+
 def test_fetch_matches_sends_no_date_params_when_unwindowed():
     with patch("src.extract.load_dotenv"), \
          patch("src.extract.getenv", return_value="token"), \

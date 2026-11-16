@@ -10,6 +10,9 @@ OUTPUT_FILE = BASE_DIR / "data" / "raw" / "season_2025_2026.json"
 
 URL = 'https://api.football-data.org/v4/competitions/PL/matches'
 
+# Without a timeout a stalled connection hangs the task indefinitely.
+REQUEST_TIMEOUT_SECONDS = 30
+
 
 def fetch_matches(date_from=None, date_to=None):
     """
@@ -41,7 +44,9 @@ def fetch_matches(date_from=None, date_to=None):
         params["dateFrom"] = date_from
         params["dateTo"] = date_to
 
-    response = requests.get(URL, headers=headers, params=params or None)
+    response = requests.get(
+        URL, headers=headers, params=params or None, timeout=REQUEST_TIMEOUT_SECONDS
+    )
     response.raise_for_status()
 
     return response.json()

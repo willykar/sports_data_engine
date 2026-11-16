@@ -91,7 +91,8 @@ def upsert_matches(conn):
         DO UPDATE SET
             home_score = EXCLUDED.home_score,
             away_score = EXCLUDED.away_score,
-            status = EXCLUDED.status;
+            status = EXCLUDED.status,
+            match_date = EXCLUDED.match_date;
     """))
 
 def main():

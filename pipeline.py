@@ -35,6 +35,27 @@ SNOWFLAKE_STAGES = [
 ]
 
 
+def select_stages(target):
+    """
+    Stages for a target, in order. With target 'all' the extract stage is shared
+    by both warehouses, so it runs once rather than hitting the API twice.
+    """
+    chosen = []
+    if target in ("postgres", "all"):
+        chosen.extend(POSTGRES_STAGES)
+    if target in ("snowflake", "all"):
+        chosen.extend(SNOWFLAKE_STAGES)
+
+    seen = set()
+    stages = []
+    for description, run_stage in chosen:
+        if run_stage in seen:
+            continue
+        seen.add(run_stage)
+        stages.append((description, run_stage))
+    return stages
+
+
 def run_pipeline(target="postgres"):
     print(f"Starting daily EPL data pipeline (target: {target})...")
 
@@ -42,11 +63,7 @@ def run_pipeline(target="postgres"):
     subprocess.run([sys.executable, "-m", "pytest"], cwd=BASE_DIR, check=True)
     print("All automated tests passed.")
 
-    stages_to_run = []
-    if target in ("postgres", "all"):
-        stages_to_run.extend(POSTGRES_STAGES)
-    if target in ("snowflake", "all"):
-        stages_to_run.extend(SNOWFLAKE_STAGES)
+    stages_to_run = select_stages(target)
 
     for number, (description, run_stage) in enumerate(stages_to_run, start=1):
         print(f"Step {number}: {description}...")

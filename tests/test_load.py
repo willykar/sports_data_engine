@@ -84,6 +84,8 @@ def test_upsert_matches_executes_insert_update_statement():
     assert "home_score = EXCLUDED.home_score" in sql
     assert "away_score = EXCLUDED.away_score" in sql
     assert "status = EXCLUDED.status" in sql
+    # A rescheduled fixture must move, not just change status.
+    assert "match_date = EXCLUDED.match_date" in sql
 
 
 
